@@ -1,0 +1,11 @@
+/tmp/
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+*.keystore
+*.jks
+
+# Separate reference repository; keep its existing history untouched.
+/NJU-Hub/
+/android/.idea/
