@@ -18,6 +18,8 @@ import java.util.*;
 /** Requests stay in the authenticated school page; no credentials cross a JavaScript bridge. */
 public class MainActivity extends Activity {
  private Store store; private CalendarSync calendar;
+ private static final int GOOGLE_CALENDAR_AUTH=71;
+ private boolean googleAuthorizing;
  private LinearLayout body, browserBin; private TextView notice; private WebView web;
  private Ui ui; private boolean interactive;
  private final Map<String,WebView> sessions=new HashMap<>();
@@ -32,7 +34,7 @@ public class MainActivity extends Activity {
  private static final String[] PLATFORMS={"moodle","lms","ehall","elite","pe"};
  private static final String[] LABELS={"SElearning Moodle","智汇南雍 LMS","教务课程成绩","GPA 与排名百分比","体育教学成绩"};
  @Override public void onCreate(Bundle state){super.onCreate(state);store=new Store(this);calendar=new CalendarSync(this,store);calendar.sync();render();}
- @Override protected void onStart(){super.onStart();if(web==null&&queue.isEmpty())autoRefresh();}
+ @Override protected void onStart(){super.onStart();GoogleCalendarJob.schedule(this,true);if(web==null&&queue.isEmpty())autoRefresh();}
  static void put(JSONObject o,String k,Object v){try{o.put(k,v);}catch(JSONException e){throw new IllegalStateException(e);}}
  private JSONObject settings(){JSONObject s=store.data.optJSONObject("settings");if(s==null){s=new JSONObject();put(store.data,"settings",s);}return s;}
  private int fg(){return dark?0xffeee8f1:0xff28212d;}
@@ -41,7 +43,7 @@ public class MainActivity extends Activity {
  private void add(String value){body.addView(text(value,16));}
  private void action(String label,Runnable r){body.addView(button(label,r));}
  private void toast(String s){Toast.makeText(this,s,Toast.LENGTH_LONG).show();}
- private void changed(){store.save();calendar.sync();}
+ private void changed(){store.save();calendar.sync();GoogleCalendarJob.schedule(this,false);}
  private void render(){
   String theme=settings().optString("theme","system");dark=theme.equals("dark")||theme.equals("system")&&(getResources().getConfiguration().uiMode&48)==32;
   setTheme(dark?android.R.style.Theme_Material_NoActionBar:android.R.style.Theme_Material_Light_NoActionBar);ui=new Ui(this,dark);for(WebView cached:sessions.values())detach(cached);for(WebView popup:popups)detach(popup);
@@ -152,7 +154,25 @@ public class MainActivity extends Activity {
   if(moreLogins)for(int i=0;i<PLATFORMS.length;i++){final int n=i;action("连接 "+LABELS[i],()->{unifiedConnecting=false;queue.clear();open(PLATFORMS[n],false);});long time=settings().optLong("success_"+PLATFORMS[i]);String error=settings().optString("error_"+PLATFORMS[i]);body.addView(ui.label((!settings().optBoolean("connected_"+PLATFORMS[i],time>0)?"未登录 · 保留本地缓存":time==0?"未连接":"更新 "+date(time))+(error.isEmpty()?"":error.contains("部分详情")?" · 部分详情未更新":" · 更新失败")));}
   action("退出全部登录（保留缓存）",this::signOut);
   String[] themes={"system","light","dark"},themeNames={"跟随系统","浅色","深色"};String current=settings().optString("theme","system");int index=Arrays.asList(themes).indexOf(current);action("外观："+themeNames[Math.max(0,index)],()->picker("外观",themeNames,i->{put(settings(),"theme",themes[i]);store.save();render();}));
-  numberSetting("作业刷新间隔（分钟）","taskInterval",30,3);numberSetting("成绩刷新间隔（分钟）","gradeInterval",10080,3);numberSetting("提前提醒（分钟）","reminderMinutes",1440,0);action("选择系统日历",calendar::chooseCalendar);action("同步日历",calendar::sync);
+  numberSetting("作业刷新间隔（分钟）","taskInterval",30,3);numberSetting("成绩刷新间隔（分钟）","gradeInterval",10080,3);numberSetting("提前提醒（分钟）","reminderMinutes",1440,0);action("选择系统日历",calendar::chooseCalendar);action("同步日历",calendar::syncNow);
+  SharedPreferences google=GoogleCalendarSync.prefs(this);
+  boolean enabled=google.getBoolean("enabled",false);
+  action(enabled?"同步 Google 日历":"连接 Google 日历",()->{
+   if(enabled){authorizeGoogleCalendar();return;}
+   new AlertDialog.Builder(this).setTitle("连接 Google 日历")
+    .setMessage("将创建 NJU Homework 日历，并同步可见作业的标题、截止时间和提醒。")
+    .setPositiveButton("继续授权",(d,w)->authorizeGoogleCalendar()).setNegativeButton("取消",null).show();
+  });
+  if(enabled){
+   add("Google 日历 · "+google.getString("status","等待同步"));
+   action("停止 Google 日历同步",()->{
+    google.edit().putBoolean("enabled",false).putInt("connection",google.getInt("connection",0)+1).apply();
+    android.app.job.JobScheduler scheduler=getSystemService(android.app.job.JobScheduler.class);
+    scheduler.cancel(GoogleCalendarSync.PERIODIC);scheduler.cancel(GoogleCalendarSync.IMMEDIATE);
+    toast("已停止同步，Google 日历中的日程保留");render();
+   });
+  }
+
  }
  private void numberSetting(String title,String key,int fallback,int min){action(title+"："+settings().optInt(key,fallback),()->{EditText e=new EditText(this);e.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);e.setText(""+settings().optInt(key,fallback));AlertDialog d=new AlertDialog.Builder(this).setTitle(title).setView(e).setPositiveButton("保存",null).setNegativeButton("取消",null).create();d.setOnShowListener(v->d.getButton(-1).setOnClickListener(w->{try{int n=Integer.parseInt(e.getText().toString());if(n<min||n>5256000)throw new Exception();put(settings(),key,n);changed();d.dismiss();render();}catch(Exception ex){toast("请输入 "+min+" 至 5256000 的整数");}}));d.show();});}
  private boolean hasCachedData(String p){
@@ -264,7 +284,40 @@ public class MainActivity extends Activity {
   generation++;reading=false;if(unifiedConnecting)connectionResults.put(p,auth?"auth":"failed");put(settings(),"error_"+p,reason);if(!unifiedConnecting){put(settings(),"checked_"+p,System.currentTimeMillis());if(auth)put(settings(),"reauthPending_"+p,true);}if(auth)loginRequired.add(p);store.save();
   if(unifiedConnecting&&auth&&!interactive&&web!=null){showBrowser(p,web);notice.setText("请完成学校认证，随后自动连接其他平台");if(ready(p,web.getUrl())&&authReopened.add(p))web.loadUrl(p.equals("pe")?"https://ggtypt.nju.edu.cn/ptm/loginto":Platforms.find(p).entryUrl());return;}if(interactive){notice.setText(reason);return;}closeWeb();if(!queue.isEmpty()||unifiedConnecting)next();else{render();notice.setText(label(p)+"："+reason+(auth?" · 点击登录":""));}
  }
- @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(request==40&&result==RESULT_OK&&data!=null){try(InputStream in=getContentResolver().openInputStream(data.getData())){if(in==null)throw new IOException();ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] b=new byte[4096];int n;while((n=in.read(b))!=-1){if(out.size()+n>2*1024*1024)throw new IOException();out.write(b,0,n);}importCsv(new String(out.toByteArray(),StandardCharsets.UTF_8));}catch(Exception e){toast("CSV 无法读取、超过 2MB 或格式不正确");}}}
+ private void authorizeGoogleCalendar(){
+  if(googleAuthorizing)return;
+  googleAuthorizing=true;
+  com.google.android.gms.auth.api.identity.Identity.getAuthorizationClient(this)
+   .authorize(GoogleCalendarJob.authorization())
+   .addOnSuccessListener(this,result->{
+    if(result.hasResolution()){
+     try{startIntentSenderForResult(result.getPendingIntent().getIntentSender(),GOOGLE_CALENDAR_AUTH,null,0,0,0);}
+     catch(IntentSender.SendIntentException e){googleAuthorizing=false;toast("无法打开 Google 授权，请重试");}
+    }else finishGoogleAuthorization(result);
+   }).addOnFailureListener(this,e->{googleAuthorizing=false;toast("Google 授权失败，请检查 Play 服务和 OAuth 配置");});
+ }
+ private void finishGoogleAuthorization(com.google.android.gms.auth.api.identity.AuthorizationResult result){
+  googleAuthorizing=false;
+  String token=result.getAccessToken();
+  if(token==null||!result.getGrantedScopes().contains(GoogleCalendarSync.SCOPE)){toast("未获得 Google 日历权限");return;}
+  SharedPreferences prefs=GoogleCalendarSync.prefs(this);
+  prefs.edit().putBoolean("enabled",true).putString("status","正在同步").apply();
+  GoogleCalendarJob.schedule(this,true);render();
+  Context app=getApplicationContext();
+  int connection=prefs.getInt("connection",0);
+  GoogleCalendarJob.EXECUTOR.execute(()->{
+   if(prefs.getInt("connection",0)!=connection)return;
+   boolean retry=GoogleCalendarJob.run(app,token);
+   if(retry)GoogleCalendarJob.schedule(app,false);
+   runOnUiThread(()->{if(!isFinishing()&&!isDestroyed()&&tab==3&&web==null){render();toast(prefs.getString("status","同步未完成"));}});
+  });
+ }
+ @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(request==GOOGLE_CALENDAR_AUTH){
+  googleAuthorizing=false;
+  if(result==RESULT_OK&&data!=null)try{finishGoogleAuthorization(com.google.android.gms.auth.api.identity.Identity.getAuthorizationClient(this).getAuthorizationResultFromIntent(data));}
+  catch(com.google.android.gms.common.api.ApiException e){toast("Google 日历授权失败");}
+  return;
+ }if(request==40&&result==RESULT_OK&&data!=null){try(InputStream in=getContentResolver().openInputStream(data.getData())){if(in==null)throw new IOException();ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] b=new byte[4096];int n;while((n=in.read(b))!=-1){if(out.size()+n>2*1024*1024)throw new IOException();out.write(b,0,n);}importCsv(new String(out.toByteArray(),StandardCharsets.UTF_8));}catch(Exception e){toast("CSV 无法读取、超过 2MB 或格式不正确");}}}
  private void importCsv(String csv){try{List<List<String>> rows=Csv.parse(csv);if(rows.isEmpty()||!rows.get(0).equals(Arrays.asList("课程名称","作业标题","作业内容","截止时间")))throw new Exception();for(int i=1;i<rows.size();i++){List<String> r=rows.get(i);if(r.size()!=4||r.get(0).trim().isEmpty()||r.get(1).trim().isEmpty())throw new Exception();parseDate(r.get(3));}new AlertDialog.Builder(this).setMessage("已校验 "+(rows.size()-1)+" 行。逐项确认课程与重复处理后导入？").setPositiveButton("导入",(d,w)->importRow(rows,1)).setNegativeButton("取消",null).show();}catch(Exception e){toast("CSV 表头应为：课程名称,作业标题,作业内容,截止时间；日期 YYYY-MM-DD HH:MM");}}
  private void importRow(List<List<String>> rows,int index){
   if(index>=rows.size()){changed();render();return;}List<String> r=rows.get(index);JSONObject course=null;for(int i=0;i<store.courses().length();i++){JSONObject c=store.courses().optJSONObject(i);if(c.optString("name").equals(r.get(0)))course=c;}

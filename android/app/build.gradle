@@ -8,8 +8,8 @@ android {
         applicationId 'edu.nju.homework'
         minSdk 26
         targetSdk 35
-        versionCode 13
-        versionName '0.2.2'
+        versionCode 15
+        versionName '0.3.0'
         testInstrumentationRunner 'edu.nju.homework.SmokeRunner'
     }
     compileOptions {
@@ -20,3 +20,5 @@ android {
         debug { storeFile rootProject.file('../tmp/android-debug.keystore') }
     }
 }
+
+dependencies { implementation 'com.google.android.gms:play-services-auth:21.6.0' }

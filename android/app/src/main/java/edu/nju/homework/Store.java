@@ -12,12 +12,14 @@ import java.util.*;
 
 /** Private local cache. Failed/partial snapshots never imply deletion. */
 public final class Store {
- public JSONObject data; private final AtomicFile file;
+ public JSONObject data; private final AtomicFile file; private boolean loaded;
+ boolean loadedFromDisk(){return loaded;}
+ private static final Object DISK_LOCK=new Object();
  private static final ZoneId DUE_ZONE=ZoneId.of("Asia/Shanghai");
- public Store(Context context){file=new AtomicFile(new File(context.getFilesDir(),"homework.json"));try(InputStream in=file.openRead();ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] b=new byte[4096];int n;while((n=in.read(b))!=-1)out.write(b,0,n);data=new JSONObject(new String(out.toByteArray(),StandardCharsets.UTF_8));}catch(Exception e){data=new JSONObject();}if(!data.has("courses"))p(data,"courses",new JSONArray());if(!data.has("tasks"))p(data,"tasks",new JSONArray());if(!data.has("settings"))p(data,"settings",new JSONObject());repairCachedDueFields();}
+ public Store(Context context){file=new AtomicFile(new File(context.getFilesDir(),"homework.json"));synchronized(DISK_LOCK){try(InputStream in=file.openRead();ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] b=new byte[4096];int n;while((n=in.read(b))!=-1)out.write(b,0,n);data=new JSONObject(new String(out.toByteArray(),StandardCharsets.UTF_8));loaded=data.optJSONArray("tasks")!=null&&data.optJSONArray("courses")!=null;}catch(Exception e){data=new JSONObject();}}if(!data.has("courses"))p(data,"courses",new JSONArray());if(!data.has("tasks"))p(data,"tasks",new JSONArray());if(!data.has("settings"))p(data,"settings",new JSONObject());repairCachedDueFields();}
  public JSONArray courses(){return data.optJSONArray("courses");} public JSONArray tasks(){return data.optJSONArray("tasks");}
  Store(JSONObject initial){file=null;data=initial;if(!data.has("courses"))p(data,"courses",new JSONArray());if(!data.has("tasks"))p(data,"tasks",new JSONArray());if(!data.has("settings"))p(data,"settings",new JSONObject());repairCachedDueFields();}
- public void save(){if(file==null)return;FileOutputStream out=null;try{out=file.startWrite();out.write(data.toString().getBytes(StandardCharsets.UTF_8));file.finishWrite(out);}catch(Exception e){if(out!=null)file.failWrite(out);throw new IllegalStateException("无法保存本地缓存",e);}}
+ public void save(){if(file==null)return;synchronized(DISK_LOCK){FileOutputStream out=null;try{out=file.startWrite();out.write(data.toString().getBytes(StandardCharsets.UTF_8));file.finishWrite(out);}catch(Exception e){if(out!=null)file.failWrite(out);throw new IllegalStateException("无法保存本地缓存",e);}}}
  private static void p(JSONObject o,String k,Object v){try{o.put(k,v);}catch(JSONException e){throw new IllegalStateException(e);}}
  private static JSONObject copy(JSONObject o){try{return new JSONObject(o.toString());}catch(Exception e){throw new IllegalStateException(e);}}
  public JSONObject course(String id){for(int i=0;i<courses().length();i++){JSONObject c=courses().optJSONObject(i);if(c!=null&&id.equals(c.optString("id")))return c;}return null;}
